@@ -24,17 +24,26 @@ class MainActivity : ComponentActivity() {
             var ttsStatus by remember { mutableStateOf("Initializing…") }
 
             DisposableEffect(Unit) {
-                tts = TextToSpeech(this@MainActivity) { status ->
-                    if (status == TextToSpeech.SUCCESS) {
-                        val langResult = tts?.setLanguage(Locale.US) ?: TextToSpeech.LANG_NOT_SUPPORTED
-                        tts?.setSpeechRate(1.0f)
-                        ttsReady = (langResult != TextToSpeech.LANG_MISSING_DATA && langResult != TextToSpeech.LANG_NOT_SUPPORTED)
-                        ttsStatus = if (ttsReady) "Ready" else "Language missing/not supported"
-                    } else {
-                        ttsReady = false
-                        ttsStatus = "Init failed (status=$status)"
-                    }
-                }
+                // Force Samsung TTS engine explicitly
+                tts = TextToSpeech(
+                    this@MainActivity,
+                    { status ->
+                        if (status == TextToSpeech.SUCCESS) {
+                            val langResult = tts?.setLanguage(Locale.US)
+                            tts?.setSpeechRate(1.0f)
+
+                            val ok = langResult != TextToSpeech.LANG_MISSING_DATA &&
+                                    langResult != TextToSpeech.LANG_NOT_SUPPORTED
+
+                            ttsReady = ok
+                            ttsStatus = if (ok) "Ready (Samsung TTS)" else "Language missing/not supported"
+                        } else {
+                            ttsReady = false
+                            ttsStatus = "Init failed (status=$status)"
+                        }
+                    },
+                    "com.samsung.SMT"
+                )
 
                 onDispose {
                     tts?.stop()
@@ -93,7 +102,12 @@ fun TimerScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("Talking Timer", style = MaterialTheme.typography.headlineSmall)
-        Text("TTS: $ttsStatus", color = if (ttsReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+
+        Text(
+            "TTS: $ttsStatus",
+            color = if (ttsReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+        )
+
         Text("Status: $status | Clicks: $clickCount")
         Text("Remaining: $timeLeft seconds", style = MaterialTheme.typography.headlineMedium)
 
@@ -128,6 +142,7 @@ fun TimerScreen(
                 status = "Running"
                 speak("Timer started")
 
+                // Force restart of the effect
                 running = false
                 running = true
             },
@@ -144,7 +159,9 @@ fun TimerScreen(
                 speak("Paused")
             },
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Pause") }
+        ) {
+            Text("Pause")
+        }
 
         OutlinedButton(
             onClick = {
@@ -157,6 +174,8 @@ fun TimerScreen(
                 speak("Reset")
             },
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Reset") }
+        ) {
+            Text("Reset")
+        }
     }
 }
