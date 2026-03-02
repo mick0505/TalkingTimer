@@ -8,18 +8,17 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.currentCoroutineContext
 import kotlin.math.max
-import kotlin.math.min
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,25 +38,27 @@ fun MusicBeepTimerScreen(context: Context) {
     var remainingSeconds by remember { mutableStateOf(60) }
     var running by remember { mutableStateOf(false) }
 
-    // Settings
+    // Settings (persisted)
     var musicVolume by remember { mutableStateOf(prefs.getFloat("music_volume", 0.8f).coerceIn(0f, 1f)) }
     var beepVolume by remember { mutableStateOf(prefs.getFloat("beep_volume", 1.0f).coerceIn(0f, 1f)) }
     var keepMusicAfterEnd by remember { mutableStateOf(prefs.getBoolean("keep_music_after_end", false)) }
 
-    // Remember last picked song URI (persistable)
+    // Control: user requests stopping music (Pause/Reset)
+    var stopRequested by remember { mutableStateOf(false) }
+
+    // Remember last picked song URI (persisted)
     var selectedMusicUri by remember {
         mutableStateOf(prefs.getString("music_uri", null)?.let { Uri.parse(it) })
     }
 
-    // Media player (single instance)
+    // Media player
     val mediaPlayer = remember { MediaPlayer() }
-    val isMusicPrepared = remember { AtomicBoolean(false) }
 
-    // Tone generator (recreate if beepVolume changes)
+    // Tone generator (recreated when beep volume changes)
     val toneGen = remember(beepVolume) {
-        // Volume is 0..100 here; map slider 0..1 -> 0..100
         ToneGenerator(AudioManager.STREAM_MUSIC, (beepVolume * 100).toInt().coerceIn(0, 100))
     }
+
     DisposableEffect(Unit) {
         onDispose {
             try { mediaPlayer.release() } catch (_: Exception) {}
@@ -73,15 +74,13 @@ fun MusicBeepTimerScreen(context: Context) {
     ) { uri ->
         if (uri != null) {
             try {
-                // Persist permission so it still works after app restarts
                 context.contentResolver.takePersistableUriPermission(
                     uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    IntentFlags.READ
                 )
             } catch (_: Exception) {
-                // Some providers may not allow persist; still store URI and try.
+                // Some providers won't allow persist; we'll still try using the URI.
             }
-
             selectedMusicUri = uri
             prefs.edit().putString("music_uri", uri.toString()).apply()
         }
@@ -106,55 +105,37 @@ fun MusicBeepTimerScreen(context: Context) {
         remainingSeconds = totalSeconds
     }
 
+    fun setPlayerVolumeSafe(v: Float) {
+        val vol = v.coerceIn(0f, 1f)
+        try { mediaPlayer.setVolume(vol, vol) } catch (_: Exception) {}
+    }
+
     suspend fun fadeMusicTo(target: Float, durationMs: Int) {
-        val start = currentMusicVolume(mediaPlayer, musicVolume)
+        val ctx = currentCoroutineContext()
+        val start = musicVolume.coerceIn(0f, 1f) // good enough as baseline
         val t = target.coerceIn(0f, 1f)
         val steps = max(1, durationMs / 30)
         for (i in 1..steps) {
-            if (!isActive) return
+            if (!ctx.isActive) return
             val v = start + (t - start) * (i.toFloat() / steps.toFloat())
-            setPlayerVolumeSafe(mediaPlayer, v)
+            setPlayerVolumeSafe(v)
             delay(30)
         }
-        setPlayerVolumeSafe(mediaPlayer, t)
-    }
-
-    fun beepDuckMusic() {
-        // Duck music briefly so the beep stands out
-        if (mediaPlayer.isPlaying) {
-            val original = musicVolume
-            val ducked = (original * 0.25f).coerceIn(0f, 1f)
-            setPlayerVolumeSafe(mediaPlayer, ducked)
-            // restore after short delay (fire-and-forget via LaunchedEffect helper below)
-        }
-        toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 140)
-    }
-
-    // Helper flag to restore volume after beep duck
-    var restoreMusicAfterDuck by remember { mutableStateOf(false) }
-    LaunchedEffect(restoreMusicAfterDuck) {
-        if (restoreMusicAfterDuck) {
-            delay(180)
-            if (mediaPlayer.isPlaying) setPlayerVolumeSafe(mediaPlayer, musicVolume)
-            restoreMusicAfterDuck = false
-        }
+        setPlayerVolumeSafe(t)
     }
 
     fun stopMusicImmediate() {
         try {
             if (mediaPlayer.isPlaying) mediaPlayer.stop()
             mediaPlayer.reset()
-            isMusicPrepared.set(false)
         } catch (_: Exception) {}
     }
 
     suspend fun stopMusicWithFadeOut() {
-        if (mediaPlayer.isPlaying) {
-            fadeMusicTo(0f, 800)
-            stopMusicImmediate()
-        } else {
-            stopMusicImmediate()
+        if (try { mediaPlayer.isPlaying } catch (_: Exception) { false }) {
+            fadeMusicTo(0f, 700)
         }
+        stopMusicImmediate()
     }
 
     suspend fun startMusicWithFadeIn() {
@@ -164,26 +145,55 @@ fun MusicBeepTimerScreen(context: Context) {
             mediaPlayer.setDataSource(context, uri)
             mediaPlayer.isLooping = true
             mediaPlayer.prepare()
-            isMusicPrepared.set(true)
-            setPlayerVolumeSafe(mediaPlayer, 0f)
+            setPlayerVolumeSafe(0f)
             mediaPlayer.start()
-            fadeMusicTo(musicVolume, 1200)
+            fadeMusicTo(musicVolume, 900)
         } catch (_: Exception) {
             stopMusicImmediate()
         }
     }
 
-    // Persist settings whenever sliders/toggles change
+    // Persist settings and apply live music volume
     LaunchedEffect(musicVolume, beepVolume, keepMusicAfterEnd) {
         saveSettings()
-        // If music is playing, apply volume change immediately
-        if (mediaPlayer.isPlaying) setPlayerVolumeSafe(mediaPlayer, musicVolume)
+        if (try { mediaPlayer.isPlaying } catch (_: Exception) { false }) {
+            setPlayerVolumeSafe(musicVolume)
+        }
+    }
+
+    // Helper: duck music during beep
+    fun beepWithDuck() {
+        val wasPlaying = try { mediaPlayer.isPlaying } catch (_: Exception) { false }
+        val original = musicVolume
+        if (wasPlaying) {
+            setPlayerVolumeSafe((original * 0.25f).coerceIn(0f, 1f))
+        }
+        toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 140)
+    }
+
+    // Restore music volume after short duck
+    var restoreDuck by remember { mutableStateOf(false) }
+    LaunchedEffect(restoreDuck, musicVolume) {
+        if (restoreDuck) {
+            delay(180)
+            if (try { mediaPlayer.isPlaying } catch (_: Exception) { false }) {
+                setPlayerVolumeSafe(musicVolume)
+            }
+            restoreDuck = false
+        }
+    }
+
+    // If user pressed Pause/Reset -> stop music with fade (even if keepMusicAfterEnd is true)
+    LaunchedEffect(stopRequested) {
+        if (stopRequested) {
+            stopMusicWithFadeOut()
+            stopRequested = false
+        }
     }
 
     // Timer loop
     LaunchedEffect(running) {
         if (running) {
-            // Start music (if any)
             startMusicWithFadeIn()
 
             var lastBeepAt = -1
@@ -200,32 +210,22 @@ fun MusicBeepTimerScreen(context: Context) {
 
                 if (shouldBeep && remainingSeconds != lastBeepAt) {
                     lastBeepAt = remainingSeconds
-                    beepDuckMusic()
-                    restoreMusicAfterDuck = true
+                    beepWithDuck()
+                    restoreDuck = true
                 }
 
                 if (remainingSeconds == 0) {
-                    // final beep
-                    beepDuckMusic()
-                    restoreMusicAfterDuck = true
-
+                    beepWithDuck()
+                    restoreDuck = true
                     running = false
                 }
             }
         } else {
-            // Timer stopped/paused/ended
+            // Timer stopped/ended
             if (!keepMusicAfterEnd) {
                 stopMusicWithFadeOut()
-            } else {
-                // If timer ended naturally, keep music playing.
-                // If user pressed Pause/Reset, they probably want it stopped — handled below.
             }
         }
-    }
-
-    // Stop music on Pause/Reset actions even if keepMusicAfterEnd is true
-    suspend fun userStopMusic() {
-        stopMusicWithFadeOut()
     }
 
     // UI
@@ -275,11 +275,8 @@ fun MusicBeepTimerScreen(context: Context) {
             valueRange = 0f..1f
         )
 
-        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Checkbox(
-                checked = keepMusicAfterEnd,
-                onCheckedChange = { keepMusicAfterEnd = it }
-            )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = keepMusicAfterEnd, onCheckedChange = { keepMusicAfterEnd = it })
             Spacer(Modifier.width(8.dp))
             Text("Keep music playing after timer ends")
         }
@@ -288,7 +285,6 @@ fun MusicBeepTimerScreen(context: Context) {
             onClick = {
                 resetFromInputs()
                 if (totalSeconds > 0) {
-                    // Force restart even if already running
                     running = false
                     running = true
                 }
@@ -300,9 +296,6 @@ fun MusicBeepTimerScreen(context: Context) {
         OutlinedButton(
             onClick = {
                 running = false
-                // User intent: stop music
-                // (launch coroutine via LaunchedEffect helper)
-                // We'll do it by toggling a state:
                 stopRequested = true
             },
             modifier = Modifier.fillMaxWidth(),
@@ -319,29 +312,13 @@ fun MusicBeepTimerScreen(context: Context) {
         ) { Text("Reset") }
 
         Divider()
-        Text("Beeps every 30 seconds and every second in the last 10 seconds.\nTip: raise Media volume.", style = MaterialTheme.typography.bodyMedium)
-    }
-
-    // A small state-driven way to stop music with fade from button clicks
-    var stopRequested by remember { mutableStateOf(false) }
-    LaunchedEffect(stopRequested) {
-        if (stopRequested) {
-            userStopMusic()
-            stopRequested = false
-        }
+        Text(
+            "Beeps every 30 seconds and every second in the last 10 seconds.\nTip: raise Media volume.",
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
 
-// Helpers
-private fun setPlayerVolumeSafe(mp: MediaPlayer, v: Float) {
-    val vol = v.coerceIn(0f, 1f)
-    try { mp.setVolume(vol, vol) } catch (_: Exception) {}
-}
-
-// We don't have a real getter, so treat UI slider as the "current" and only fade from that.
-// (Good enough for our use: we always set volume through our code.)
-private fun currentMusicVolume(mp: MediaPlayer, fallback: Float): Float {
-    return try {
-        if (mp.isPlaying) fallback else fallback
-    } catch (_: Exception) { fallback }
+private object IntentFlags {
+    const val READ: Int = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
 }
