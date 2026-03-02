@@ -8,12 +8,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import java.util.Locale
-import kotlin.math.max
 
 class MainActivity : ComponentActivity() {
 
@@ -22,20 +19,23 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        tts = TextToSpeech(this) {
-            tts?.language = Locale.US
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts?.language = Locale.US
+            }
         }
 
         setContent {
             MaterialTheme {
                 TimerScreen { text ->
-                    tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+                    tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "timer")
                 }
             }
         }
     }
 
     override fun onDestroy() {
+        tts?.stop()
         tts?.shutdown()
         super.onDestroy()
     }
@@ -61,33 +61,36 @@ fun TimerScreen(speak: (String) -> Unit) {
         }
     }
 
-    Column(Modifier.padding(20.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
 
         Text("Talking Timer", style = MaterialTheme.typography.headlineMedium)
-
-        Spacer(Modifier.height(20.dp))
+        Text("Remaining: $timeLeft seconds")
 
         OutlinedTextField(
             value = minutes,
-            onValueChange = { minutes = it.filter(Char::isDigit) },
-            label = { Text("Minutes") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            onValueChange = { minutes = it.filter { c -> c.isDigit() } },
+            label = { Text("Minutes") }
         )
 
         OutlinedTextField(
             value = seconds,
-            onValueChange = { seconds = it.filter(Char::isDigit) },
-            label = { Text("Seconds") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            onValueChange = { seconds = it.filter { c -> c.isDigit() } },
+            label = { Text("Seconds") }
         )
-
-        Spacer(Modifier.height(20.dp))
 
         Button(onClick = {
             val m = minutes.toIntOrNull() ?: 0
             val s = seconds.toIntOrNull() ?: 0
             timeLeft = m * 60 + s
-            if (timeLeft > 0) running = true
+            if (timeLeft > 0) {
+                running = true
+                speak("Timer started")
+            }
         }) {
             Text("Start")
         }
