@@ -1,15 +1,18 @@
-TalkingTimer/
-  .github/workflows/android.yml
-  settings.gradle.kts
-  build.gradle.kts
-  gradle.properties
-  gradlew
-  gradlew.bat
-  gradle/wrapper/gradle-wrapper.properties
-  gradle/wrapper/gradle-wrapper.jar
-  app/build.gradle.kts
-  app/src/main/AndroidManifest.xml
-  app/src/main/java/com/example/talkingtimer/MainActivity.kt
-  app/src/main/res/values/strings.xml
-  app/src/main/res/xml/backup_rules.xml
-  app/src/main/res/xml/data_extraction_rules.xml
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "TalkingTimer"
+include(":app")
