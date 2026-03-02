@@ -13,6 +13,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show commit + show MainActivity + search KeyboardOptions
+        run: |
+          echo "COMMIT SHA:"
+          git rev-parse HEAD
+          echo "LAST COMMIT:"
+          git --no-pager log -1 --oneline
+          echo "---- MainActivity.kt (first 160 lines) ----"
+          sed -n '1,160p' app/src/main/java/com/example/talkingtimer/MainActivity.kt
+          echo "---- grep KeyboardOptions ----"
+          grep -RIn "KeyboardOptions" app/src/main/java || true
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
