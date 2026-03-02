@@ -19,37 +19,57 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.US
-            }
-        }
-
         setContent {
+            var ttsReady by remember { mutableStateOf(false) }
+            var ttsStatus by remember { mutableStateOf("Initializing…") }
+
+            DisposableEffect(Unit) {
+                tts = TextToSpeech(this@MainActivity) { status ->
+                    if (status == TextToSpeech.SUCCESS) {
+                        val langResult = tts?.setLanguage(Locale.US) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                        tts?.setSpeechRate(1.0f)
+                        ttsReady = (langResult != TextToSpeech.LANG_MISSING_DATA && langResult != TextToSpeech.LANG_NOT_SUPPORTED)
+                        ttsStatus = if (ttsReady) "Ready" else "Language missing/not supported"
+                    } else {
+                        ttsReady = false
+                        ttsStatus = "Init failed (status=$status)"
+                    }
+                }
+
+                onDispose {
+                    tts?.stop()
+                    tts?.shutdown()
+                    tts = null
+                }
+            }
+
             MaterialTheme {
                 TimerScreen(
-                    speak = { text -> tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "timer") }
+                    ttsReady = ttsReady,
+                    ttsStatus = ttsStatus,
+                    speak = { text ->
+                        if (ttsReady) {
+                            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "timer")
+                        }
+                    }
                 )
             }
         }
     }
-
-    override fun onDestroy() {
-        tts?.stop()
-        tts?.shutdown()
-        super.onDestroy()
-    }
 }
 
 @Composable
-fun TimerScreen(speak: (String) -> Unit) {
+fun TimerScreen(
+    ttsReady: Boolean,
+    ttsStatus: String,
+    speak: (String) -> Unit
+) {
     var minutes by remember { mutableStateOf("1") }
     var seconds by remember { mutableStateOf("0") }
 
     var timeLeft by remember { mutableStateOf(60) }
     var running by remember { mutableStateOf(false) }
 
-    // This is just to prove clicks work
     var clickCount by remember { mutableStateOf(0) }
     var status by remember { mutableStateOf("Ready") }
 
@@ -73,6 +93,7 @@ fun TimerScreen(speak: (String) -> Unit) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("Talking Timer", style = MaterialTheme.typography.headlineSmall)
+        Text("TTS: $ttsStatus", color = if (ttsReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
         Text("Status: $status | Clicks: $clickCount")
         Text("Remaining: $timeLeft seconds", style = MaterialTheme.typography.headlineMedium)
 
@@ -107,7 +128,6 @@ fun TimerScreen(speak: (String) -> Unit) {
                 status = "Running"
                 speak("Timer started")
 
-                // Force restart even if already true
                 running = false
                 running = true
             },
