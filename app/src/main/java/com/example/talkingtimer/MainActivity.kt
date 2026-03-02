@@ -1,7 +1,8 @@
 package com.example.talkingtimer
 
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Bundle
-import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -10,86 +11,80 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
-import java.util.Locale
 
 class MainActivity : ComponentActivity() {
-
-    private var tts: TextToSpeech? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         setContent {
-            var ttsReady by remember { mutableStateOf(false) }
-            var ttsStatus by remember { mutableStateOf("Initializing…") }
-
-            DisposableEffect(Unit) {
-                // Force Samsung TTS engine explicitly
-                tts = TextToSpeech(
-                    this@MainActivity,
-                    { status ->
-                        if (status == TextToSpeech.SUCCESS) {
-                            val langResult = tts?.setLanguage(Locale.US)
-                            tts?.setSpeechRate(1.0f)
-
-                            val ok = langResult != TextToSpeech.LANG_MISSING_DATA &&
-                                    langResult != TextToSpeech.LANG_NOT_SUPPORTED
-
-                            ttsReady = ok
-                            ttsStatus = if (ok) "Ready (Samsung TTS)" else "Language missing/not supported"
-                        } else {
-                            ttsReady = false
-                            ttsStatus = "Init failed (status=$status)"
-                        }
-                    },
-                    "com.samsung.SMT"
-                )
-
-                onDispose {
-                    tts?.stop()
-                    tts?.shutdown()
-                    tts = null
-                }
-            }
-
             MaterialTheme {
-                TimerScreen(
-                    ttsReady = ttsReady,
-                    ttsStatus = ttsStatus,
-                    speak = { text ->
-                        if (ttsReady) {
-                            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "timer")
-                        }
-                    }
-                )
+                BeepingTimerScreen()
             }
         }
     }
 }
 
 @Composable
-fun TimerScreen(
-    ttsReady: Boolean,
-    ttsStatus: String,
-    speak: (String) -> Unit
-) {
+fun BeepingTimerScreen() {
     var minutes by remember { mutableStateOf("1") }
     var seconds by remember { mutableStateOf("0") }
 
-    var timeLeft by remember { mutableStateOf(60) }
+    var totalSeconds by remember { mutableStateOf(60) }
+    var remainingSeconds by remember { mutableStateOf(60) }
     var running by remember { mutableStateOf(false) }
 
-    var clickCount by remember { mutableStateOf(0) }
-    var status by remember { mutableStateOf("Ready") }
+    // Beep settings
+    val beepEverySeconds = 30
+    val lastSecondsCountdown = 10 // beeps every second in last 10 seconds
+    val beepDurationMs = 120
+
+    // One ToneGenerator for the whole screen lifetime
+    val toneGen = remember {
+        ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+    }
+    DisposableEffect(Unit) {
+        onDispose { toneGen.release() }
+    }
+
+    fun beep() {
+        // You can swap TONE_PROP_BEEP for other tones if you prefer
+        toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, beepDurationMs)
+    }
+
+    fun clampInt(text: String): Int = (text.toIntOrNull() ?: 0).coerceAtLeast(0)
+
+    fun resetFromInputs() {
+        val m = clampInt(minutes)
+        val s = clampInt(seconds).coerceIn(0, 59)
+        minutes = m.toString()
+        seconds = s.toString()
+        totalSeconds = m * 60 + s
+        remainingSeconds = totalSeconds
+    }
+
+    LaunchedEffect(Unit) { resetFromInputs() }
 
     LaunchedEffect(running) {
-        if (!running) return@LaunchedEffect
-        while (running && timeLeft > 0) {
+        var lastBeepAt = -1
+        while (running && remainingSeconds > 0) {
             delay(1000)
-            timeLeft -= 1
-            if (timeLeft == 0) {
-                status = "Done"
-                speak("Time is up")
+            remainingSeconds -= 1
+
+            val shouldBeep =
+                // Beep every 30 seconds (e.g., 90, 60, 30)
+                (remainingSeconds % beepEverySeconds == 0 && remainingSeconds != totalSeconds) ||
+                // Beep each second in last 10 seconds
+                (remainingSeconds in 1..lastSecondsCountdown)
+
+            if (shouldBeep && remainingSeconds != lastBeepAt) {
+                lastBeepAt = remainingSeconds
+                beep()
+            }
+
+            if (remainingSeconds == 0) {
+                // Final longer beep(s)
+                beep()
                 running = false
             }
         }
@@ -101,81 +96,58 @@ fun TimerScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Talking Timer", style = MaterialTheme.typography.headlineSmall)
-
-        Text(
-            "TTS: $ttsStatus",
-            color = if (ttsReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-        )
-
-        Text("Status: $status | Clicks: $clickCount")
-        Text("Remaining: $timeLeft seconds", style = MaterialTheme.typography.headlineMedium)
+        Text("Beeping Timer", style = MaterialTheme.typography.headlineSmall)
+        Text("Remaining: ${remainingSeconds}s", style = MaterialTheme.typography.headlineMedium)
 
         OutlinedTextField(
             value = minutes,
             onValueChange = { minutes = it.filter(Char::isDigit).take(3) },
             label = { Text("Minutes") },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !running
         )
 
         OutlinedTextField(
             value = seconds,
             onValueChange = { seconds = it.filter(Char::isDigit).take(2) },
             label = { Text("Seconds") },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !running
         )
 
         Button(
             onClick = {
-                clickCount += 1
-                val m = minutes.toIntOrNull() ?: 0
-                val s = seconds.toIntOrNull() ?: 0
-                val total = m * 60 + s
-
-                if (total <= 0) {
-                    status = "Enter a time"
-                    speak("Please enter a time")
-                    return@Button
+                resetFromInputs()
+                if (totalSeconds > 0) {
+                    // Force restart even if already running
+                    running = false
+                    running = true
                 }
-
-                timeLeft = total
-                status = "Running"
-                speak("Timer started")
-
-                // Force restart of the effect
-                running = false
-                running = true
             },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Start")
-        }
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !running
+        ) { Text("Start") }
+
+        OutlinedButton(
+            onClick = { running = false },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = running
+        ) { Text("Pause") }
 
         OutlinedButton(
             onClick = {
-                clickCount += 1
                 running = false
-                status = "Paused"
-                speak("Paused")
+                resetFromInputs()
             },
             modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Pause")
-        }
+        ) { Text("Reset") }
 
-        OutlinedButton(
-            onClick = {
-                clickCount += 1
-                running = false
-                status = "Reset"
-                val m = minutes.toIntOrNull() ?: 0
-                val s = seconds.toIntOrNull() ?: 0
-                timeLeft = (m * 60 + s).coerceAtLeast(0)
-                speak("Reset")
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Reset")
-        }
+        Divider()
+
+        Text(
+            "Beeps every 30 seconds, and every second in the last 10 seconds.\n" +
+                    "Tip: Make sure Media volume is up.",
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
