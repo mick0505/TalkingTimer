@@ -17,13 +17,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import kotlin.math.max
 
@@ -61,7 +66,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         remainingSeconds = totalSeconds
     }
 
-    // Save minutes/seconds whenever changed (remember countdown time)
+    // Save last-used minutes/seconds
     LaunchedEffect(minutes, seconds) {
         prefs.edit()
             .putString("last_minutes", minutes)
@@ -69,13 +74,15 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             .apply()
     }
 
-    // Initialize remainingSeconds from saved inputs once
+    // Initialize countdown from saved inputs on first launch of screen
     LaunchedEffect(Unit) { resetFromInputs() }
 
     // ---------- SETTINGS ----------
     var musicVolume by remember { mutableStateOf(prefs.getFloat("music_volume", 0.8f).coerceIn(0f, 1f)) }
     var beepVolume by remember { mutableStateOf(prefs.getFloat("beep_volume", 1.0f).coerceIn(0f, 1f)) }
     var keepMusicAfterEnd by remember { mutableStateOf(prefs.getBoolean("keep_music_after_end", false)) }
+
+    // Voice control toggle
     var voiceControlOn by remember { mutableStateOf(prefs.getBoolean("voice_on", true)) }
 
     // Custom beep
@@ -151,11 +158,11 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    // ---------- REQUEST FLAGS (declared BEFORE use) ----------
+    // ---------- REQUEST FLAGS ----------
     var playRequested by remember { mutableStateOf(false) }
     var stopRequested by remember { mutableStateOf(false) }
 
-    // Auto-advance on song end
+    // Auto-advance on track end
     DisposableEffect(playlist, currentIndex, running, keepMusicAfterEnd) {
         musicPlayer.setOnCompletionListener {
             val shouldContinue = running || keepMusicAfterEnd
@@ -188,7 +195,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    // ---------- BEEP (fallback tone + custom beep audio) ----------
+    // ---------- BEEP ----------
     val toneGen = remember(beepVolume) {
         ToneGenerator(AudioManager.STREAM_MUSIC, (beepVolume * 100).toInt().coerceIn(0, 100))
     }
@@ -216,6 +223,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         if (playing && baseline >= 0f) setMusicVolumeSafe(baseline.coerceIn(0f, 1f))
     }
 
+    // Play custom beep sound N times, fallback to tone if none
     LaunchedEffect(customBeepRequest, beepSoundUri, beepVolume, musicVolume) {
         val times = customBeepRequest
         if (times <= 0) return@LaunchedEffect
@@ -278,23 +286,29 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    // ---------- VOICE CONTROL ----------
-    var micGranted by remember {
-        mutableStateOf(
+    // ---------- VOICE CONTROL (robust) ----------
+    val speechAvailable = remember { SpeechRecognizer.isRecognitionAvailable(context) }
+
+    var micGranted by remember { mutableStateOf(false) }
+    fun refreshMicPermission() {
+        micGranted =
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                     PackageManager.PERMISSION_GRANTED
-        )
     }
+    LaunchedEffect(Unit) { refreshMicPermission() }
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { granted -> micGranted = granted }
+    ) { granted ->
+        micGranted = granted
+    }
 
     var lastHeard by remember { mutableStateOf("") }
 
     val speechRecognizer = remember {
-        if (SpeechRecognizer.isRecognitionAvailable(context)) SpeechRecognizer.createSpeechRecognizer(context) else null
+        if (speechAvailable) SpeechRecognizer.createSpeechRecognizer(context) else null
     }
+
     DisposableEffect(Unit) {
         onDispose { try { speechRecognizer?.destroy() } catch (_: Exception) {} }
     }
@@ -338,6 +352,8 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
 
     fun startListening() {
         val sr = speechRecognizer ?: return
+        if (!speechAvailable || !micGranted || !voiceControlOn) return
+
         try {
             sr.setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {}
@@ -347,6 +363,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
                 override fun onEndOfSpeech() {}
 
                 override fun onError(error: Int) {
+                    // Restart continuous listening if enabled
                     if (voiceControlOn && micGranted) {
                         try { sr.startListening(buildRecognizerIntent()) } catch (_: Exception) {}
                     }
@@ -381,8 +398,20 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         try { speechRecognizer?.cancel() } catch (_: Exception) {}
     }
 
-    LaunchedEffect(voiceControlOn, micGranted) {
-        if (voiceControlOn && micGranted) startListening() else stopListening()
+    // Restart listening on resume, stop on pause (this fixes Samsung “stops listening” behavior)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, voiceControlOn, micGranted) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshMicPermission()
+                if (voiceControlOn && micGranted) startListening()
+            }
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                stopListening()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // ---------- TIMER LOOP ----------
@@ -440,9 +469,14 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             .apply()
     }
 
-    // ---------- UI ----------
+    // ---------- UI (SCROLLABLE so Start never “disappears”) ----------
+    val scroll = rememberScrollState()
+
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scroll)
+            .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("Music Timer", style = MaterialTheme.typography.headlineSmall)
@@ -522,19 +556,34 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             Text("Keep music playing after timer ends")
         }
 
+        Divider()
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = voiceControlOn, onCheckedChange = { voiceControlOn = it })
             Spacer(Modifier.width(8.dp))
             Text("Voice control: say “start / pause / reset / next / previous”")
         }
 
+        Text("Speech available: $speechAvailable | Mic granted: $micGranted")
+
         if (voiceControlOn && !micGranted) {
             Button(
                 onClick = { micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Enable Microphone Permission") }
-        } else if (voiceControlOn) {
+        }
+
+        if (voiceControlOn && micGranted && speechAvailable) {
+            OutlinedButton(
+                onClick = { startListening() },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Start Listening Now") }
+
             Text("Heard: $lastHeard", style = MaterialTheme.typography.bodyMedium)
+        }
+
+        if (voiceControlOn && !speechAvailable) {
+            Text("Speech recognition not available on this device/service.", color = MaterialTheme.colorScheme.error)
         }
 
         Divider()
