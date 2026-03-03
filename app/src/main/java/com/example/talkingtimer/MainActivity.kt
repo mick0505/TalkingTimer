@@ -31,7 +31,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 1) Keep screen on while app is open
+        // Keep phone awake while app is open
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         setContent { MaterialTheme { MusicBeepVoiceTimerScreen(this) } }
@@ -42,9 +42,10 @@ class MainActivity : ComponentActivity() {
 fun MusicBeepVoiceTimerScreen(context: Context) {
     val prefs = remember { context.getSharedPreferences("timer_prefs", Context.MODE_PRIVATE) }
 
-    // ---------- TIMER ----------
-    var minutes by remember { mutableStateOf("1") }
-    var seconds by remember { mutableStateOf("0") }
+    // ---------- TIMER (remember last used) ----------
+    var minutes by remember { mutableStateOf(prefs.getString("last_minutes", "1") ?: "1") }
+    var seconds by remember { mutableStateOf(prefs.getString("last_seconds", "0") ?: "0") }
+
     var totalSeconds by remember { mutableStateOf(60) }
     var remainingSeconds by remember { mutableStateOf(60) }
     var running by remember { mutableStateOf(false) }
@@ -59,6 +60,17 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         totalSeconds = m * 60 + s
         remainingSeconds = totalSeconds
     }
+
+    // Save minutes/seconds whenever changed (remember countdown time)
+    LaunchedEffect(minutes, seconds) {
+        prefs.edit()
+            .putString("last_minutes", minutes)
+            .putString("last_seconds", seconds)
+            .apply()
+    }
+
+    // Initialize remainingSeconds from saved inputs once
+    LaunchedEffect(Unit) { resetFromInputs() }
 
     // ---------- SETTINGS ----------
     var musicVolume by remember { mutableStateOf(prefs.getFloat("music_volume", 0.8f).coerceIn(0f, 1f)) }
@@ -91,7 +103,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         currentIndex = if (currentIndex - 1 < 0) playlist.size - 1 else currentIndex - 1
     }
 
-    // ---------- MEDIA ----------
+    // ---------- MUSIC PLAYER ----------
     val musicPlayer = remember { MediaPlayer() }
 
     fun setMusicVolumeSafe(v: Float) {
@@ -107,7 +119,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
     }
 
     suspend fun fadeMusicTo(target: Float, durationMs: Int) {
-        val start = musicVolume.coerceIn(0f, 1f) // baseline; good enough
+        val start = musicVolume.coerceIn(0f, 1f) // baseline; fine for this app
         val t = target.coerceIn(0f, 1f)
         val steps = max(1, durationMs / 30)
         for (i in 1..steps) {
@@ -155,13 +167,12 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         onDispose { musicPlayer.setOnCompletionListener(null) }
     }
 
-    // Apply volume live
+    // Apply volume live while playing
     LaunchedEffect(musicVolume) {
         val playing = try { musicPlayer.isPlaying } catch (_: Exception) { false }
         if (playing) setMusicVolumeSafe(musicVolume)
     }
 
-    // Handle queued play (Next/Prev/Auto-advance)
     LaunchedEffect(playRequested) {
         if (playRequested) {
             stopMusicImmediate()
@@ -170,7 +181,6 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    // Handle queued stop (Pause/Reset)
     LaunchedEffect(stopRequested) {
         if (stopRequested) {
             stopMusicWithFadeOut()
@@ -186,18 +196,15 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         onDispose { try { toneGen.release() } catch (_: Exception) {} }
     }
 
-    // Play custom beep N times (or fallback tone if none selected)
     var customBeepRequest by remember { mutableStateOf(0) }
 
     fun requestBeep(times: Int) {
         customBeepRequest = times.coerceIn(1, 10)
     }
 
-    // Duck music while beeping
     fun duckMusicForBeep(): Float {
         val playing = try { musicPlayer.isPlaying } catch (_: Exception) { false }
         if (!playing) return -1f
-        // we don't have a getter for the true current volume, so use slider as baseline
         val baseline = musicVolume.coerceIn(0f, 1f)
         val ducked = (baseline * 0.25f).coerceIn(0f, 1f)
         setMusicVolumeSafe(ducked)
@@ -209,7 +216,6 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         if (playing && baseline >= 0f) setMusicVolumeSafe(baseline.coerceIn(0f, 1f))
     }
 
-    // Sequentially play beep sound N times with small gaps
     LaunchedEffect(customBeepRequest, beepSoundUri, beepVolume, musicVolume) {
         val times = customBeepRequest
         if (times <= 0) return@LaunchedEffect
@@ -227,7 +233,6 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
                     p.setDataSource(context, uri)
                     p.setOnCompletionListener { mp -> mp.release() }
                     p.prepare()
-                    // approximate volume: MediaPlayer volume is per-player; we apply beepVolume here
                     val v = beepVolume.coerceIn(0f, 1f)
                     p.setVolume(v, v)
                     p.start()
@@ -235,12 +240,11 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
                     toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 140)
                 }
             }
-            delay(220) // spacing between beeps
+            delay(220)
         }
 
         delay(120)
         restoreMusicAfterBeep(baseline)
-
         customBeepRequest = 0
     }
 
@@ -417,7 +421,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    // ---------- PERSIST ----------
+    // ---------- PERSIST SETTINGS ----------
     LaunchedEffect(
         musicVolume, beepVolume, keepMusicAfterEnd, voiceControlOn,
         beepCount, beepSoundUri, last10Enabled,
@@ -490,7 +494,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             Text(if (beepSoundUri == null) "Select Beep Sound" else "Change Beep Sound")
         }
 
-        Text("Beep count (how many beeps each time): $beepCount")
+        Text("Beep count (each time): $beepCount")
         Slider(
             value = beepCount.toFloat(),
             onValueChange = { beepCount = it.toInt().coerceIn(1, 5) },
