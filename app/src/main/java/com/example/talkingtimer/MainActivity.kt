@@ -17,9 +17,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -66,6 +66,8 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         remainingSeconds = totalSeconds
     }
 
+    LaunchedEffect(Unit) { resetFromInputs() }
+
     // Save last-used minutes/seconds
     LaunchedEffect(minutes, seconds) {
         prefs.edit()
@@ -74,21 +76,11 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             .apply()
     }
 
-    // Initialize countdown from saved inputs on first launch of screen
-    LaunchedEffect(Unit) { resetFromInputs() }
-
     // ---------- SETTINGS ----------
     var musicVolume by remember { mutableStateOf(prefs.getFloat("music_volume", 0.8f).coerceIn(0f, 1f)) }
     var beepVolume by remember { mutableStateOf(prefs.getFloat("beep_volume", 1.0f).coerceIn(0f, 1f)) }
     var keepMusicAfterEnd by remember { mutableStateOf(prefs.getBoolean("keep_music_after_end", false)) }
-
-    // Voice control toggle
     var voiceControlOn by remember { mutableStateOf(prefs.getBoolean("voice_on", true)) }
-
-    // Custom beep
-    var beepCount by remember { mutableStateOf(prefs.getInt("beep_count", 1).coerceIn(1, 5)) }
-    var beepSoundUri by remember { mutableStateOf(prefs.getString("beep_uri", null)?.let { Uri.parse(it) }) }
-    var last10Enabled by remember { mutableStateOf(prefs.getBoolean("last10_enabled", true)) }
 
     // ---------- PLAYLIST ----------
     var playlist by remember { mutableStateOf(loadUriList(prefs.getString("playlist_uris", null))) }
@@ -126,7 +118,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
     }
 
     suspend fun fadeMusicTo(target: Float, durationMs: Int) {
-        val start = musicVolume.coerceIn(0f, 1f) // baseline; fine for this app
+        val start = musicVolume.coerceIn(0f, 1f)
         val t = target.coerceIn(0f, 1f)
         val steps = max(1, durationMs / 30)
         for (i in 1..steps) {
@@ -174,7 +166,6 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         onDispose { musicPlayer.setOnCompletionListener(null) }
     }
 
-    // Apply volume live while playing
     LaunchedEffect(musicVolume) {
         val playing = try { musicPlayer.isPlaying } catch (_: Exception) { false }
         if (playing) setMusicVolumeSafe(musicVolume)
@@ -195,7 +186,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    // ---------- BEEP ----------
+    // ---------- BEEP (simple) ----------
     val toneGen = remember(beepVolume) {
         ToneGenerator(AudioManager.STREAM_MUSIC, (beepVolume * 100).toInt().coerceIn(0, 100))
     }
@@ -203,18 +194,11 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         onDispose { try { toneGen.release() } catch (_: Exception) {} }
     }
 
-    var customBeepRequest by remember { mutableStateOf(0) }
-
-    fun requestBeep(times: Int) {
-        customBeepRequest = times.coerceIn(1, 10)
-    }
-
     fun duckMusicForBeep(): Float {
         val playing = try { musicPlayer.isPlaying } catch (_: Exception) { false }
         if (!playing) return -1f
         val baseline = musicVolume.coerceIn(0f, 1f)
-        val ducked = (baseline * 0.25f).coerceIn(0f, 1f)
-        setMusicVolumeSafe(ducked)
+        setMusicVolumeSafe((baseline * 0.25f).coerceIn(0f, 1f))
         return baseline
     }
 
@@ -223,40 +207,25 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         if (playing && baseline >= 0f) setMusicVolumeSafe(baseline.coerceIn(0f, 1f))
     }
 
-    // Play custom beep sound N times, fallback to tone if none
-    LaunchedEffect(customBeepRequest, beepSoundUri, beepVolume, musicVolume) {
-        val times = customBeepRequest
-        if (times <= 0) return@LaunchedEffect
-
+    suspend fun beepOnce() {
         val baseline = duckMusicForBeep()
-
-        for (i in 1..times) {
-            val uri = beepSoundUri
-            if (uri == null) {
-                toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 140)
-            } else {
-                try {
-                    val p = MediaPlayer()
-                    p.setAudioStreamType(AudioManager.STREAM_MUSIC)
-                    p.setDataSource(context, uri)
-                    p.setOnCompletionListener { mp -> mp.release() }
-                    p.prepare()
-                    val v = beepVolume.coerceIn(0f, 1f)
-                    p.setVolume(v, v)
-                    p.start()
-                } catch (_: Exception) {
-                    toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 140)
-                }
-            }
-            delay(220)
-        }
-
-        delay(120)
+        toneGen.startTone(ToneGenerator.TONE_PROP_BEEP, 140)
+        delay(180)
         restoreMusicAfterBeep(baseline)
-        customBeepRequest = 0
     }
 
-    // ---------- PICKERS ----------
+    var finalBeepsRequested by remember { mutableStateOf(false) }
+
+    LaunchedEffect(finalBeepsRequested) {
+        if (!finalBeepsRequested) return@LaunchedEffect
+        finalBeepsRequested = false
+        repeat(5) {
+            beepOnce()
+            delay(140)
+        }
+    }
+
+    // ---------- PICK MUSIC (MULTI) ----------
     val pickMultipleMusicLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -273,20 +242,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    val pickBeepSoundLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: Exception) {}
-            beepSoundUri = uri
-        }
-    }
-
-    // ---------- VOICE CONTROL (robust) ----------
+    // ---------- VOICE CONTROL (fix “beeping every few seconds”) ----------
     val speechAvailable = remember { SpeechRecognizer.isRecognitionAvailable(context) }
 
     var micGranted by remember { mutableStateOf(false) }
@@ -299,9 +255,7 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
 
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        micGranted = granted
-    }
+    ) { granted -> micGranted = granted }
 
     var lastHeard by remember { mutableStateOf("") }
 
@@ -350,55 +304,45 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    fun startListening() {
-        val sr = speechRecognizer ?: return
-        if (!speechAvailable || !micGranted || !voiceControlOn) return
-
-        try {
-            sr.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-
-                override fun onError(error: Int) {
-                    // Restart continuous listening if enabled
-                    if (voiceControlOn && micGranted) {
-                        try { sr.startListening(buildRecognizerIntent()) } catch (_: Exception) {}
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val best = texts?.firstOrNull().orEmpty()
-                    if (best.isNotBlank()) {
-                        lastHeard = best
-                        handleCommand(best)
-                    }
-                    if (voiceControlOn && micGranted) {
-                        try { sr.startListening(buildRecognizerIntent()) } catch (_: Exception) {}
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {
-                    val texts = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val best = texts?.firstOrNull().orEmpty()
-                    if (best.isNotBlank()) lastHeard = best
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-            sr.startListening(buildRecognizerIntent())
-        } catch (_: Exception) {}
-    }
-
     fun stopListening() {
         try { speechRecognizer?.stopListening() } catch (_: Exception) {}
         try { speechRecognizer?.cancel() } catch (_: Exception) {}
     }
 
-    // Restart listening on resume, stop on pause (this fixes Samsung “stops listening” behavior)
+    // Restart listening with delay (prevents the system “listening beep” loop)
+    var restartListeningRequested by remember { mutableStateOf(false) }
+
+    LaunchedEffect(restartListeningRequested, voiceControlOn, micGranted) {
+        if (!restartListeningRequested) return@LaunchedEffect
+        restartListeningRequested = false
+        delay(1500)
+        if (voiceControlOn && micGranted) {
+            startListeningNow(
+                speechRecognizer = speechRecognizer,
+                intent = buildRecognizerIntent(),
+                onHeard = { heard ->
+                    lastHeard = heard
+                    handleCommand(heard)
+                },
+                onNeedRestart = { restartListeningRequested = true }
+            )
+        }
+    }
+
+    fun startListening() {
+        if (!speechAvailable || !micGranted || !voiceControlOn) return
+        startListeningNow(
+            speechRecognizer = speechRecognizer,
+            intent = buildRecognizerIntent(),
+            onHeard = { heard ->
+                lastHeard = heard
+                handleCommand(heard)
+            },
+            onNeedRestart = { restartListeningRequested = true }
+        )
+    }
+
+    // Lifecycle: start on resume, stop on pause
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, voiceControlOn, micGranted) {
         val observer = LifecycleEventObserver { _, event ->
@@ -414,14 +358,18 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // ---------- TIMER LOOP ----------
+    // Start/stop based on toggles
+    LaunchedEffect(voiceControlOn, micGranted) {
+        if (voiceControlOn && micGranted) startListening() else stopListening()
+    }
+
+    // ---------- TIMER LOOP (beep rules: 1 every 30s, 5 at end) ----------
     LaunchedEffect(running) {
         if (running) {
             if (playlist.isNotEmpty()) startCurrentTrackWithFadeIn()
 
             var lastBeepAt = -1
             val beepEverySeconds = 30
-            val lastSecondsCountdown = 10
 
             while (running && remainingSeconds > 0) {
                 delay(1000)
@@ -430,18 +378,13 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
                 val shouldBeep30 =
                     (remainingSeconds % beepEverySeconds == 0 && remainingSeconds != totalSeconds)
 
-                val shouldBeepLast10 =
-                    last10Enabled && (remainingSeconds in 1..lastSecondsCountdown)
-
-                val shouldBeep = shouldBeep30 || shouldBeepLast10
-
-                if (shouldBeep && remainingSeconds != lastBeepAt) {
+                if (shouldBeep30 && remainingSeconds != lastBeepAt) {
                     lastBeepAt = remainingSeconds
-                    requestBeep(beepCount)
+                    beepOnce()
                 }
 
                 if (remainingSeconds == 0) {
-                    requestBeep(beepCount)
+                    finalBeepsRequested = true
                     running = false
                 }
             }
@@ -450,10 +393,9 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
         }
     }
 
-    // ---------- PERSIST SETTINGS ----------
+    // ---------- PERSIST ----------
     LaunchedEffect(
         musicVolume, beepVolume, keepMusicAfterEnd, voiceControlOn,
-        beepCount, beepSoundUri, last10Enabled,
         playlist, currentIndex
     ) {
         prefs.edit()
@@ -461,15 +403,12 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             .putFloat("beep_volume", beepVolume)
             .putBoolean("keep_music_after_end", keepMusicAfterEnd)
             .putBoolean("voice_on", voiceControlOn)
-            .putInt("beep_count", beepCount)
-            .putString("beep_uri", beepSoundUri?.toString())
-            .putBoolean("last10_enabled", last10Enabled)
             .putString("playlist_uris", saveUriList(playlist))
             .putInt("playlist_index", currentIndex)
             .apply()
     }
 
-    // ---------- UI (SCROLLABLE so Start never “disappears”) ----------
+    // ---------- UI (scrollable) ----------
     val scroll = rememberScrollState()
 
     Column(
@@ -521,29 +460,6 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
 
         Divider()
 
-        Button(
-            onClick = { pickBeepSoundLauncher.launch(arrayOf("audio/*")) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(if (beepSoundUri == null) "Select Beep Sound" else "Change Beep Sound")
-        }
-
-        Text("Beep count (each time): $beepCount")
-        Slider(
-            value = beepCount.toFloat(),
-            onValueChange = { beepCount = it.toInt().coerceIn(1, 5) },
-            valueRange = 1f..5f,
-            steps = 3
-        )
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = last10Enabled, onCheckedChange = { last10Enabled = it })
-            Spacer(Modifier.width(8.dp))
-            Text("Enable last 10-second beeps")
-        }
-
-        Divider()
-
         Text("Music volume: ${(musicVolume * 100).toInt()}%")
         Slider(value = musicVolume, onValueChange = { musicVolume = it.coerceIn(0f, 1f) })
 
@@ -582,10 +498,6 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             Text("Heard: $lastHeard", style = MaterialTheme.typography.bodyMedium)
         }
 
-        if (voiceControlOn && !speechAvailable) {
-            Text("Speech recognition not available on this device/service.", color = MaterialTheme.colorScheme.error)
-        }
-
         Divider()
 
         Button(
@@ -610,6 +522,49 @@ fun MusicBeepVoiceTimerScreen(context: Context) {
             onClick = { running = false; resetFromInputs(); stopRequested = true },
             modifier = Modifier.fillMaxWidth()
         ) { Text("Reset") }
+    }
+}
+
+// Starts listening once, and requests a delayed restart instead of immediate looping (prevents constant beeps)
+private fun startListeningNow(
+    speechRecognizer: SpeechRecognizer?,
+    intent: Intent,
+    onHeard: (String) -> Unit,
+    onNeedRestart: () -> Unit
+) {
+    val sr = speechRecognizer ?: return
+    try {
+        sr.cancel() // ensure clean state before starting
+    } catch (_: Exception) {}
+
+    try {
+        sr.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+
+            override fun onError(error: Int) {
+                onNeedRestart()
+            }
+
+            override fun onResults(results: Bundle?) {
+                val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val best = texts?.firstOrNull().orEmpty()
+                if (best.isNotBlank()) onHeard(best)
+                onNeedRestart()
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                // ignore partials to reduce churn
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        sr.startListening(intent)
+    } catch (_: Exception) {
+        onNeedRestart()
     }
 }
 
